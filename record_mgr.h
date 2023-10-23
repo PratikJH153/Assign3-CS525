@@ -20,11 +20,11 @@ typedef struct RecordManager
 	BM_PageHandle bm_pageHandle;
 	SM_PageHandle sm_pageHandle;
 	BM_BufferPool bufferPool;
-	RID recordID;
+	RID rid;
 	Expr *cond;
 	int freeIndex;
-	int scanCount;
-	int attrCount;
+	int scanNum;
+	int attrNum;
 } RecordManager;
 
 // table and manager
