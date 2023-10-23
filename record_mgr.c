@@ -122,8 +122,10 @@ extern RC createTable(char *name, Schema *schema)
 	char data[PAGE_SIZE];
 	char *handler = data;
 	SM_FileHandle sm_fileHandle;
+    int numAttr = schema->numAttr;
+    int keySize = schema->keySize;
 
-	int values[] = {0, 1, schema->numAttr, schema->keySize};
+	int values[] = {0, 1, numAttr, keySize};
 	int* pointer = (int*)handler;
 	int range = sizeof(values) / sizeof(values[0]);
 
@@ -132,7 +134,7 @@ extern RC createTable(char *name, Schema *schema)
 		handler += sizeof(int);
 	}
 
-	for (int i = 0; i < schema->numAttr; i++) {
+	for (int i = 0; i < numAttr; i++) {
 		strncpy(handler, schema->attrNames[i], 15);
 		handler += 15;
 
@@ -152,14 +154,16 @@ extern RC createTable(char *name, Schema *schema)
 
 extern RC openTable(RM_TableData *rel, char *name) {
     RC return_code = RC_OK;
+    BM_BufferPool *bufferPool = &recordManager->bufferPool;
+    BM_PageHandle *bm_pageHandle = &recordManager->bm_pageHandle;
 
     // Set the management data and name
     rel->mgmtData = recordManager;
     rel->name = name;
 
     // Read data from the page
-    pinPage(&recordManager->bufferPool, &recordManager->bm_pageHandle, 0);
-    SM_PageHandle sm_pageHandle = (char *)recordManager->bm_pageHandle.data;
+    pinPage(bufferPool, bm_pageHandle, 0);
+    SM_PageHandle sm_pageHandle = (char *)bm_pageHandle->data;
 
     recordManager->attrCount = *(int *)sm_pageHandle;
     sm_pageHandle += sizeof(int);
@@ -189,24 +193,49 @@ extern RC openTable(RM_TableData *rel, char *name) {
     rel->schema = schema;
 
     // Cleanup and unpin page
-    unpinPage(&recordManager->bufferPool, &recordManager->bm_pageHandle);
-    forcePage(&recordManager->bufferPool, &recordManager->bm_pageHandle);
+    unpinPage(bufferPool, bm_pageHandle);
+    forcePage(bufferPool, bm_pageHandle);
 
     return return_code;
 }
 
 //!Change this
-int findFreeSlot(char *data, int totalSlots, int recordSize)
+int placeSlot(char *data, int totalSlots, int recordSize)
 {
-    for (int i = 0; i < totalSlots; i++)
+    int i = 0;
+    while (i < totalSlots)
     {
-        char firstChar = data[i * recordSize];
+        int index = i * recordSize;
+
+        char firstChar = data[index];
         if (firstChar != '+')
         {
             return i;
         }
+
+        i += 1;
     }
     return -1;
+}
+
+extern RC findSlotAndPlaceRecord(RID *rid, BM_BufferPool *bufferPool, BM_PageHandle *bm_pageHandle, char *data, int totalSlots, int size, Record *record){
+    while (rid->slot == -1)
+    {
+        unpinPage(bufferPool, bm_pageHandle);
+        pinPage(bufferPool, bm_pageHandle, rid->page + 1);
+        data = bm_pageHandle->data;
+        
+        rid->page += 1;
+        rid->slot = placeSlot(data, totalSlots, size);
+    }
+
+    int slotIndex = rid->slot;
+
+    char *slotPointer = data + (slotIndex * size);
+    markDirty(bufferPool, bm_pageHandle);
+
+    *slotPointer = '+';
+    memcpy(slotPointer + 1, record->data + 1, size - 1);
 }
 
 
@@ -215,38 +244,26 @@ extern RC insertRecord(RM_TableData *rel, Record *record)
     RC return_code = RC_OK;
     RecordManager *recordManager = rel->mgmtData;
     RID *rid = &record->id;
+
+    BM_BufferPool *bufferPool = &recordManager->bufferPool;
+    BM_PageHandle *bm_pageHandle = &recordManager->bm_pageHandle;
+
     char *data;
     int size = getRecordSize(rel->schema);
     int totalSlots = PAGE_SIZE / size;
 
-    pinPage(&recordManager->bufferPool, &recordManager->bm_pageHandle, recordManager->freeIndex);
+    pinPage(bufferPool, bm_pageHandle, recordManager->freeIndex);
 
     rid->page = recordManager->freeIndex;
-    data = recordManager->bm_pageHandle.data;
+    data = bm_pageHandle->data;
 
-    rid->slot = findFreeSlot(data, totalSlots, size);
+    rid->slot = placeSlot(data, totalSlots, size);
 
-    while (rid->slot == -1)
-    {
-        unpinPage(&recordManager->bufferPool, &recordManager->bm_pageHandle);
-        pinPage(&recordManager->bufferPool, &recordManager->bm_pageHandle, rid->page + 1);
-        data = recordManager->bm_pageHandle.data;
-        
-        rid->page += 1;
-        rid->slot = findFreeSlot(data, totalSlots, size);
-    }
+    findSlotAndPlaceRecord(rid, bufferPool, bm_pageHandle, data, totalSlots, size, record);
 
-    int slotIndex = rid->slot;
-
-    char *slotPointer = data + (slotIndex * size);
-    markDirty(&recordManager->bufferPool, &recordManager->bm_pageHandle);
-
-    *slotPointer = '+';
-    memcpy(slotPointer + 1, record->data + 1, size - 1);
-
-    unpinPage(&recordManager->bufferPool, &recordManager->bm_pageHandle);
-    recordManager->attrCount++;
-    pinPage(&recordManager->bufferPool, &recordManager->bm_pageHandle, 0);
+    unpinPage(bufferPool, bm_pageHandle);
+    recordManager->attrCount += 1;
+    pinPage(bufferPool, bm_pageHandle, 0);
 
     return return_code;
 }
@@ -257,8 +274,11 @@ extern RC deleteRecord(RM_TableData *rel, RID id)
     RC return_code = RC_OK;
     RecordManager *recordManager = rel->mgmtData;
 
+    BM_BufferPool *bufferPool = &recordManager->bufferPool;
+    BM_PageHandle *bm_pageHandle = &recordManager->bm_pageHandle;
+
     // Pin the page containing the record to delete
-    int pinnedPage = pinPage(&recordManager->bufferPool, &recordManager->bm_pageHandle, id.page);
+    int pinnedPage = pinPage(bufferPool, bm_pageHandle, id.page);
 
     // Update the freePage in the RecordManager
     recordManager->freeIndex = id.page;
@@ -268,10 +288,10 @@ extern RC deleteRecord(RM_TableData *rel, RID id)
     int slotID = id.slot;
     int position = slotID * size;
 
-    recordManager->bm_pageHandle.data += position;
+    bm_pageHandle->data += position;
 
     // Mark the page as dirty
-    int isDirty = markDirty(&recordManager->bufferPool, &recordManager->bm_pageHandle);
+    int isDirty = markDirty(bufferPool, bm_pageHandle);
 	if (isDirty != RC_OK){
 		return_code = isDirty;
 		printError(return_code);
@@ -280,7 +300,7 @@ extern RC deleteRecord(RM_TableData *rel, RID id)
 	}
 
     // Unpin the page
-    unpinPage(&recordManager->bufferPool, &recordManager->bm_pageHandle);
+    unpinPage(bufferPool, bm_pageHandle);
 
     return return_code;
 }
@@ -291,10 +311,13 @@ extern RC updateRecord(RM_TableData *rel, Record *record)
 	RC return_code = RC_OK;
 	RecordManager *recordManager = rel->mgmtData;
 
-    int pageNum = record->id.page;
-	pinPage(&recordManager->bufferPool, &recordManager->bm_pageHandle, pageNum);
+    BM_BufferPool *bufferPool = &recordManager->bufferPool;
+    BM_PageHandle *bm_pageHandle = &recordManager->bm_pageHandle;
 
-	char *data = recordManager->bm_pageHandle.data;
+    int pageNum = record->id.page;
+	pinPage(bufferPool, bm_pageHandle, pageNum);
+
+	char *data = bm_pageHandle->data;
 	int size = getRecordSize(rel->schema);
 	RID rid = record->id;
 
@@ -306,8 +329,8 @@ extern RC updateRecord(RM_TableData *rel, Record *record)
 
 	memcpy(data + 1, record->data + 1, size - 1);
 
-	markDirty(&recordManager->bufferPool, &recordManager->bm_pageHandle);
-	unpinPage(&recordManager->bufferPool, &recordManager->bm_pageHandle);
+	markDirty(bufferPool, bm_pageHandle);
+	unpinPage(bufferPool, bm_pageHandle);
 
 	return return_code;
 }
@@ -319,6 +342,7 @@ extern RC getRecord(RM_TableData *rel, RID id, Record *record)
     RecordManager *recordManager = rel->mgmtData;
     BM_BufferPool *bufferPool = &recordManager->bufferPool;
     BM_PageHandle *bm_pageHandle = &recordManager->bm_pageHandle;
+
     int pageNum = id.page;
     int slotID = id.slot;
     int size = getRecordSize(rel->schema);
@@ -386,43 +410,15 @@ void initializeRecordFromData(Record *record, char *data, int recordSize, RID *r
     memcpy(record->data + 1, data + 1, recordSize - 1);
 }
 
-extern RC findNextTuple(int scanCount, int attrCount, RecordManager *scanner, int totalSlots, int size, Record *record, Schema *schema, Value *result){
-    while (scanCount < attrCount) {
-        if (scanCount <= 0) {
-            scanner->recordID.page = 1;
-            scanner->recordID.slot = 0;
-        } else {
-            scanner->recordID.slot += 1;
-            if (scanner->recordID.slot >= totalSlots) {
-                scanner->recordID.slot = 0;
-                scanner->recordID.page += 1;
-            }
-        }
-
-        pinPage(&recordManager->bufferPool, &scanner->bm_pageHandle, scanner->recordID.page);
-        char *data = scanner->bm_pageHandle.data;
-
-        data += (scanner->recordID.slot * size);
-
-        initializeRecordFromData(record, data, size, &scanner->recordID);
-
-        scanner->scanCount += 1;
-        scanCount += 1;
-
-        evalExpr(record, schema, scanner->cond, &result);
-
-        if (result->v.boolV == TRUE) {
-            unpinPage(&recordManager->bufferPool, &scanner->bm_pageHandle);
-            return RC_OK;
-        }
-    }
-}
 
 // Main next function
 extern RC next(RM_ScanHandle *scan, Record *record) {
-    RC return_code = RC_RM_NO_MORE_TUPLES;
     RecordManager *recordManager = scan->rel->mgmtData;
     RecordManager *scanner = scan->mgmtData;
+
+    BM_BufferPool *bufferPool = &recordManager->bufferPool;
+    BM_PageHandle *bm_pageHandle = &scanner->bm_pageHandle;
+    
     Schema *schema = scan->rel->schema;
 
     if (!conditionExists(scan)) {
@@ -436,9 +432,42 @@ extern RC next(RM_ScanHandle *scan, Record *record) {
     int totalSlots = PAGE_SIZE / size;
     int scanCount = scanner->scanCount;
     int attrCount = recordManager->attrCount;
+    
+    if (scanCount <= 0) {
+        scanner->recordID.page = 1;
+        scanner->recordID.slot = 0;
+    }
 
-    findNextTuple(scanCount, attrCount, scanner, totalSlots, size, record, schema, result);
-    unpinPage(&recordManager->bufferPool, &scanner->bm_pageHandle);
+    while (scanCount < attrCount) {
+        scanner->recordID.slot += 1;
+        if (scanner->recordID.slot >= totalSlots) {
+            scanner->recordID.slot = 0;
+            scanner->recordID.page += 1;
+        }
+        
+        int pageNum = scanner->recordID.page;
+        pinPage(bufferPool, bm_pageHandle, pageNum);
+        char *data = bm_pageHandle->data;
+
+        int slotIndex = scanner->recordID.slot;
+
+        data += (slotIndex * size);
+
+        initializeRecordFromData(record, data, size, &scanner->recordID);
+
+        scanner->scanCount += 1;
+        scanCount += 1;
+
+        evalExpr(record, schema, scanner->cond, &result);
+
+        if (result->v.boolV == TRUE) {
+            unpinPage(bufferPool, bm_pageHandle);
+            return RC_OK;
+        }
+    }
+
+
+    unpinPage(bufferPool, bm_pageHandle);
 
     scanner->recordID.page = 1;
     scanner->recordID.slot = 0;
@@ -454,11 +483,14 @@ extern RC closeScan(RM_ScanHandle *scan)
 	RecordManager *scanner = scan->mgmtData;
 	RecordManager *recordManager = scan->rel->mgmtData;
 
+    BM_BufferPool *bufferPool = &recordManager->bufferPool;
+    BM_PageHandle *bm_pageHandle = &scanner->bm_pageHandle;
+
 	if (scanner->scanCount > 0 || recordManager->scanCount > 0)
 	{
 		scanner->recordID.page = 1;
 		scanner->recordID.slot, scanner->scanCount = 0;
-		unpinPage(&recordManager->bufferPool, &scanner->bm_pageHandle);
+		unpinPage(bufferPool, bm_pageHandle);
     }
 
 	free(scan->mgmtData);
