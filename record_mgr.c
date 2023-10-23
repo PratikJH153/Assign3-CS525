@@ -200,7 +200,7 @@ extern RC openTable(RM_TableData *rel, char *name) {
 }
 
 //!Change this
-int placeSlot(char *data, int totalSlots, int recordSize)
+int findEmptySlot(char *data, int totalSlots, int recordSize)
 {
     int i = 0;
     while (i < totalSlots)
@@ -236,7 +236,7 @@ extern RC findSlotAndPlaceRecord(RID *rid, BM_BufferPool *bufferPool, BM_PageHan
 
     // Update the page number and find a free slot
     rid->page = newPage;
-    rid->slot = placeSlot(data, totalSlots, size);
+    rid->slot = findEmptySlot(data, totalSlots, size);
     }
 
     if (rid->slot != -1) {
@@ -269,7 +269,7 @@ extern RC insertRecord(RM_TableData *rel, Record *record)
     rid->page = recordManager->freeIndex;
     data = bm_pageHandle->data;
 
-    rid->slot = placeSlot(data, totalSlots, size);
+    rid->slot = findEmptySlot(data, totalSlots, size);
 
     findSlotAndPlaceRecord(rid, bufferPool, bm_pageHandle, data, totalSlots, size, record);
 
